@@ -21,6 +21,7 @@ permissions:
   id-token: write
   pull-requests: write
   issues: write
+  statuses: write
 
 env:
   GCP_PROJECT_ID: project-8bc6ae2b-eb97-4015-86d
@@ -115,4 +116,37 @@ jobs:
           gh pr comment "${{ github.event.pull_request.number }}" \
             --repo "$GITHUB_REPOSITORY" \
             --body "runner_wake state=${state} stage=${stage} auth=${AUTH_OUTCOME} start=${START_OUTCOME} restart=${RESTART_OUTCOME}"
+          [[ "$state" == success ]]
+
+      - name: Publish sanitized recovery status on the executed commit
+        if: always()
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          AUTH_OUTCOME: ${{ steps.auth.outcome }}
+          START_OUTCOME: ${{ steps.start_vm.outcome }}
+          RESTART_OUTCOME: ${{ steps.restart_runners.outcome }}
+        run: |
+          state=failure
+          stage=oidc-auth
+          if [[ "$AUTH_OUTCOME" == success ]]; then stage=vm-start; fi
+          if [[ "$START_OUTCOME" == success ]]; then stage=runner-restart; fi
+          if [[ "$RESTART_OUTCOME" == success ]]; then state=success; stage=completed; fi
+          description="Biso runner wake ${state} at ${stage}"
+          payload="$(python3 - "$state" "$stage" "$description" <<'PY'
+          import json, sys
+          print(json.dumps({
+              'state': sys.argv[1],
+              'context': 'ops/biso-runner-wake/' + sys.argv[2],
+              'description': sys.argv[3],
+          }))
+          PY
+          )"
+          curl --fail --silent --show-error \
+            --request POST \
+            --header "Authorization: Bearer ${GH_TOKEN}" \
+            --header "Accept: application/vnd.github+json" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/statuses/${GITHUB_SHA}" \
+            --data "$payload" >/dev/null
           [[ "$state" == success ]]
