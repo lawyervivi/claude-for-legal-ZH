@@ -9,11 +9,18 @@ on:
     branches: [main]
     paths:
       - 'temp-wake-trigger.txt'
+  pull_request_target:
+    types: [opened, reopened, synchronize]
+    branches: [main]
+    paths:
+      - 'temp-wake-trigger.txt'
   workflow_dispatch:
 
 permissions:
   contents: read
   id-token: write
+  pull-requests: write
+  issues: write
 
 env:
   GCP_PROJECT_ID: project-8bc6ae2b-eb97-4015-86d
@@ -28,7 +35,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - name: Exchange GitHub OIDC for short-lived GCP credentials
+      - id: auth
+        name: Exchange GitHub OIDC for short-lived GCP credentials
+        continue-on-error: true
         uses: google-github-actions/auth@v3
         with:
           workload_identity_provider: ${{ env.GCP_WORKLOAD_IDENTITY_PROVIDER }}
@@ -38,9 +47,12 @@ jobs:
           access_token_lifetime: 900s
 
       - name: Install Google Cloud CLI
+        if: steps.auth.outcome == 'success'
         uses: google-github-actions/setup-gcloud@v3
 
-      - name: Start the existing cost-controlled VM when stopped
+      - id: start_vm
+        name: Start the existing cost-controlled VM when stopped
+        if: steps.auth.outcome == 'success'
         shell: bash
         run: |
           set -euo pipefail
@@ -60,7 +72,9 @@ jobs:
           done
           echo "running_status=${status}"
 
-      - name: Restart all existing GitHub runner services through IAP
+      - id: restart_runners
+        name: Restart all existing GitHub runner services through IAP
+        if: steps.auth.outcome == 'success' && steps.start_vm.outcome == 'success'
         shell: bash
         run: |
           set -euo pipefail
@@ -83,3 +97,22 @@ jobs:
                   && echo "runner_listener_ready=$service" \
                   || true
               done'
+
+      - name: Report sanitized recovery result on the trigger PR
+        if: always() && github.event_name == 'pull_request_target'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          AUTH_OUTCOME: ${{ steps.auth.outcome }}
+          START_OUTCOME: ${{ steps.start_vm.outcome }}
+          RESTART_OUTCOME: ${{ steps.restart_runners.outcome }}
+        run: |
+          state=failure
+          stage=oidc-auth
+          if [[ "$AUTH_OUTCOME" == success ]]; then stage=vm-start; fi
+          if [[ "$START_OUTCOME" == success ]]; then stage=runner-restart; fi
+          if [[ "$RESTART_OUTCOME" == success ]]; then state=success; stage=completed; fi
+          gh pr comment "${{ github.event.pull_request.number }}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --body "runner_wake state=${state} stage=${stage} auth=${AUTH_OUTCOME} start=${START_OUTCOME} restart=${RESTART_OUTCOME}"
+          [[ "$state" == success ]]
