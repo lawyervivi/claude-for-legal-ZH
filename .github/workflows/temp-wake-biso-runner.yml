@@ -1,0 +1,81 @@
+name: Temporary wake existing Biso self-hosted runner
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/temp-wake-biso-runner.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  GCP_PROJECT_ID: project-8bc6ae2b-eb97-4015-86d
+  GCP_PROJECT_NUMBER: '39007674919'
+  GCP_INSTANCE: biso-ocr-test-01
+  GCP_ZONE: us-west1-b
+  GCP_WORKLOAD_IDENTITY_PROVIDER: projects/39007674919/locations/global/workloadIdentityPools/bisobrain-github/providers/bisobrain-main
+  GCP_DEPLOY_SERVICE_ACCOUNT: bisobrain-github-deployer@project-8bc6ae2b-eb97-4015-86d.iam.gserviceaccount.com
+
+jobs:
+  wake:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Exchange GitHub OIDC for short-lived GCP credentials
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ env.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ env.GCP_DEPLOY_SERVICE_ACCOUNT }}
+          create_credentials_file: true
+          export_environment_variables: true
+          access_token_lifetime: 900s
+
+      - name: Install Google Cloud CLI
+        uses: google-github-actions/setup-gcloud@v3
+
+      - name: Start the existing cost-controlled VM when stopped
+        shell: bash
+        run: |
+          set -euo pipefail
+          status="$(gcloud compute instances describe "$GCP_INSTANCE" \
+            --project="$GCP_PROJECT_ID" --zone="$GCP_ZONE" --format='value(status)')"
+          echo "initial_status=${status}"
+          if [[ "$status" != RUNNING ]]; then
+            gcloud compute instances start "$GCP_INSTANCE" \
+              --project="$GCP_PROJECT_ID" --zone="$GCP_ZONE" --quiet
+          fi
+          for attempt in $(seq 1 60); do
+            status="$(gcloud compute instances describe "$GCP_INSTANCE" \
+              --project="$GCP_PROJECT_ID" --zone="$GCP_ZONE" --format='value(status)')"
+            [[ "$status" == RUNNING ]] && break
+            [[ "$attempt" -lt 60 ]] || exit 1
+            sleep 5
+          done
+          echo "running_status=${status}"
+
+      - name: Restart all existing GitHub runner services through IAP
+        shell: bash
+        run: |
+          set -euo pipefail
+          gcloud compute ssh "$GCP_INSTANCE" \
+            --project="$GCP_PROJECT_ID" --zone="$GCP_ZONE" \
+            --tunnel-through-iap --quiet \
+            --command='set -euo pipefail
+              mapfile -t services < <(sudo systemctl list-unit-files --type=service --no-legend | awk "/^actions\\.runner\\./ {print \$1}")
+              test "${#services[@]}" -gt 0
+              for service in "${services[@]}"; do
+                sudo systemctl enable "$service" >/dev/null 2>&1 || true
+                sudo systemctl restart "$service"
+                sudo systemctl is-active --quiet "$service"
+                echo "runner_service_active=$service"
+              done
+              sleep 8
+              for service in "${services[@]}"; do
+                sudo journalctl -u "$service" --since "-5 minutes" --no-pager -n 120 \
+                  | grep -Eq "Listening for Jobs|Connected to GitHub|Running job" \
+                  && echo "runner_listener_ready=$service" \
+                  || true
+              done'
