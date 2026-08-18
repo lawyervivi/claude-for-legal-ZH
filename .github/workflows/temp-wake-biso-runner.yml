@@ -20,7 +20,7 @@ env:
   GCP_PROJECT_NUMBER: '39007674919'
   GCP_INSTANCE: biso-ocr-test-01
   GCP_ZONE: us-west1-b
-  GCP_WORKLOAD_IDENTITY_PROVIDER: projects/39007674919/locations/global/workloadIdentityPools/bisobrain-github/providers/bisobrain-main
+  GCP_WORKLOAD_IDENTITY_PROVIDER: projects/39007674919/locations/global/workloadIdentityPools/bisobrain-github/providers/bisobrain-github-main
   GCP_DEPLOY_SERVICE_ACCOUNT: bisobrain-github-deployer@project-8bc6ae2b-eb97-4015-86d.iam.gserviceaccount.com
 
 jobs:
